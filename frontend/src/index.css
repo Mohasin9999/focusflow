@@ -1,0 +1,220 @@
+@import "tailwindcss";
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap');
+
+@layer base {
+    :root {
+        --ff-sand: #e8ded0;
+        --ff-paper: #f6f2eb;
+        --ff-panel: rgba(255, 255, 255, 0.88);
+        --ff-graphite: #121212;
+        --ff-charcoal: #1c1c1d;
+        --ff-ink: #222222;
+        --ff-grid: rgba(255, 255, 255, 0.08);
+        --ff-line: rgba(255, 194, 52, 0.4);
+        --ff-accent: #ffb114;
+        --ff-accent-deep: #ff6a00;
+        --ff-accent-soft: rgba(255, 177, 20, 0.12);
+        --ff-slate: #848484;
+    }
+
+    * {
+        border-color: var(--color-slate-200);
+        -webkit-tap-highlight-color: transparent;
+    }
+
+    ::selection {
+        background-color: rgba(255, 177, 20, 0.26);
+        color: #1f1f1f;
+    }
+
+    body {
+        background:
+            radial-gradient(circle at top left, rgba(255, 177, 20, 0.14), transparent 22%),
+            linear-gradient(135deg, #d9d2c8 0%, var(--ff-sand) 40%, #c9b58d 100%);
+        color: var(--ff-ink);
+        font-family: "Space Grotesk", var(--font-sans);
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
+        transition-property: color, background-color, border-color, text-decoration-color, fill, stroke;
+        transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+        transition-duration: 500ms;
+    }
+
+    ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+    }
+
+    ::-webkit-scrollbar-track {
+        background: rgba(255, 255, 255, 0.08);
+    }
+
+    ::-webkit-scrollbar-thumb {
+        background-color: rgba(255, 177, 20, 0.45);
+        border-radius: 9999px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+        background-color: rgba(255, 177, 20, 0.7);
+    }
+}
+
+@layer utilities {
+    .ff-dashboard-shell {
+        background:
+            linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+            radial-gradient(circle at 32% 30%, rgba(255, 177, 20, 0.12), transparent 22%),
+            linear-gradient(135deg, #101010, #171717 48%, #1d1d1d 100%);
+        background-size: 96px 96px, 96px 96px, auto, auto;
+        position: relative;
+    }
+
+    .ff-dashboard-shell::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+            radial-gradient(circle at 70% 65%, rgba(255, 255, 255, 0.12), transparent 20%),
+            radial-gradient(circle at 15% 70%, rgba(255, 255, 255, 0.06), transparent 18%);
+        opacity: 0.45;
+        pointer-events: none;
+    }
+
+    .ff-dashboard-shell-soft {
+        background:
+            linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+            linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+            radial-gradient(circle at 30% 28%, rgba(255, 177, 20, 0.09), transparent 24%),
+            linear-gradient(135deg, #111111, #151515 50%, #1a1a1a 100%);
+        background-size: 120px 120px, 120px 120px, auto, auto;
+        position: relative;
+    }
+
+    .ff-dashboard-shell-soft::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+            radial-gradient(circle at 68% 60%, rgba(255, 255, 255, 0.08), transparent 22%),
+            linear-gradient(180deg, rgba(0, 0, 0, 0.06), transparent 22%);
+        opacity: 0.32;
+        pointer-events: none;
+    }
+
+    .ff-panel-dark {
+        background:
+            linear-gradient(135deg, rgba(58, 58, 58, 0.94), rgba(34, 34, 34, 0.94));
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: 0 26px 60px rgba(0, 0, 0, 0.28);
+        backdrop-filter: blur(16px);
+    }
+
+    .ff-panel-light {
+        background:
+            linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(246, 242, 235, 0.9));
+        border: 1px solid rgba(27, 27, 27, 0.08);
+        box-shadow: 0 18px 40px rgba(48, 41, 31, 0.12);
+    }
+
+    .ff-panel-dark-soft {
+        background:
+            linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.04));
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+
+    .ff-input-dark {
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.06);
+        color: #f3eee5;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+    }
+
+    .ff-input-dark::placeholder {
+        color: #7e7e7e;
+    }
+
+    .ff-input-dark:focus {
+        outline: none;
+        border-color: rgba(255, 177, 20, 0.28);
+        box-shadow:
+            0 0 0 3px rgba(255, 177, 20, 0.12),
+            inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    }
+
+    .ff-input-light {
+        border: 1px solid rgba(27, 27, 27, 0.08);
+        background: rgba(255, 255, 255, 0.72);
+        color: #171717;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
+    }
+
+    .ff-input-light::placeholder {
+        color: #9d968c;
+    }
+
+    .ff-input-light:focus {
+        outline: none;
+        border-color: rgba(255, 177, 20, 0.34);
+        box-shadow:
+            0 0 0 3px rgba(255, 177, 20, 0.12),
+            inset 0 1px 0 rgba(255, 255, 255, 0.28);
+    }
+
+    .ff-chip-dark {
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: rgba(255, 255, 255, 0.05);
+        color: #ddd6ca;
+    }
+
+    .ff-chip-light {
+        border: 1px solid rgba(27, 27, 27, 0.08);
+        background: rgba(255, 255, 255, 0.72);
+        color: #6c6358;
+    }
+
+    .ff-button-accent {
+        background: linear-gradient(135deg, var(--ff-accent), #ffc641);
+        color: #111111;
+        box-shadow: 0 18px 32px rgba(255, 177, 20, 0.2);
+    }
+
+    .ff-button-accent:hover {
+        background: linear-gradient(135deg, #ffc641, #ffd671);
+    }
+
+    .ff-button-dark {
+        background: #171717;
+        color: #f7f3ea;
+        box-shadow: 0 18px 32px rgba(23, 23, 23, 0.2);
+    }
+
+    .ff-button-dark:hover {
+        background: #232323;
+    }
+
+    .ff-accent-line {
+        position: relative;
+    }
+
+    .ff-accent-line::after {
+        content: "";
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: -1px;
+        height: 2px;
+        background: linear-gradient(90deg, var(--ff-accent), var(--ff-accent-deep));
+    }
+
+    .ff-soft-ring {
+        box-shadow:
+            0 0 0 1px rgba(255, 177, 20, 0.2),
+            0 0 0 8px rgba(255, 177, 20, 0.05);
+    }
+
+    .ff-text-balance {
+        text-wrap: balance;
+    }
+}
