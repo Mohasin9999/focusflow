@@ -51,17 +51,45 @@ create table if not exists public.logs (
   session_name text not null default '',
   notes text not null default '',
   timestamp timestamptz not null default now(),
+  log_date date not null default current_date,
   created_at timestamptz not null default now()
 );
 
 alter table public.logs
 add column if not exists session_name text not null default '';
 
+alter table public.logs
+add column if not exists log_date date;
+
 update public.logs
 set session_name = notes
 where source = 'session'
   and btrim(session_name) = ''
   and btrim(notes) <> '';
+
+update public.logs
+set log_date = timestamp::date
+where log_date is null
+  or (
+    log_date = current_date
+    and created_at < date_trunc('day', now())
+    and timestamp::date <> current_date
+  );
+
+alter table public.logs
+alter column log_date set default current_date;
+
+alter table public.logs
+alter column log_date set not null;
+
+create table if not exists public.daily_focus_totals (
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  focus_date date not null,
+  total_focus_secs integer not null default 0 check (total_focus_secs >= 0),
+  total_distracted_secs integer not null default 0 check (total_distracted_secs >= 0),
+  updated_at timestamptz not null default now(),
+  primary key (user_id, focus_date)
+);
 
 create table if not exists public.study_material_folders (
   id uuid primary key default gen_random_uuid(),
@@ -90,6 +118,14 @@ create table if not exists public.study_materials (
   uploaded_at timestamptz not null default now()
 );
 
+create table if not exists public.ai_coach_messages (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  role text not null check (role in ('user', 'assistant')),
+  content text not null,
+  created_at timestamptz not null default now()
+);
+
 alter table public.study_materials
 drop constraint if exists study_materials_name_not_blank;
 
@@ -110,6 +146,12 @@ on public.logs (user_id, timestamp desc);
 create index if not exists logs_user_id_type_id_timestamp_idx
 on public.logs (user_id, type_id, timestamp desc);
 
+create index if not exists logs_user_id_log_date_type_id_idx
+on public.logs (user_id, log_date, type_id);
+
+create index if not exists daily_focus_totals_user_id_focus_date_idx
+on public.daily_focus_totals (user_id, focus_date desc);
+
 create index if not exists study_material_folders_user_id_idx
 on public.study_material_folders (user_id);
 
@@ -118,6 +160,9 @@ on public.study_materials (user_id);
 
 create index if not exists study_materials_folder_id_idx
 on public.study_materials (folder_id);
+
+create index if not exists ai_coach_messages_user_id_created_at_idx
+on public.ai_coach_messages (user_id, created_at asc);
 
 create or replace function public.set_current_timestamp_updated_at()
 returns trigger
@@ -128,6 +173,97 @@ begin
   return new;
 end;
 $$;
+
+create or replace function public.refresh_daily_focus_total(target_user_id uuid, target_focus_date date)
+returns void
+language plpgsql
+security definer
+as $$
+declare
+  focus_total integer;
+  distracted_total integer;
+begin
+  if target_user_id is null or target_focus_date is null then
+    return;
+  end if;
+
+  select
+    coalesce(sum(duration_secs), 0)::integer,
+    coalesce(sum(distracted_secs), 0)::integer
+  into focus_total, distracted_total
+  from public.logs
+  where user_id = target_user_id
+    and log_date = target_focus_date
+    and type_id = 'focus';
+
+  insert into public.daily_focus_totals (
+    user_id,
+    focus_date,
+    total_focus_secs,
+    total_distracted_secs,
+    updated_at
+  )
+  values (
+    target_user_id,
+    target_focus_date,
+    focus_total,
+    distracted_total,
+    now()
+  )
+  on conflict (user_id, focus_date) do update
+  set
+    total_focus_secs = excluded.total_focus_secs,
+    total_distracted_secs = excluded.total_distracted_secs,
+    updated_at = now();
+end;
+$$;
+
+create or replace function public.sync_daily_focus_totals_from_logs()
+returns trigger
+language plpgsql
+security definer
+as $$
+begin
+  if tg_op in ('INSERT', 'UPDATE') and new.type_id = 'focus' then
+    perform public.refresh_daily_focus_total(new.user_id, new.log_date);
+  end if;
+
+  if tg_op in ('UPDATE', 'DELETE') and old.type_id = 'focus' then
+    perform public.refresh_daily_focus_total(old.user_id, old.log_date);
+  end if;
+
+  if tg_op = 'DELETE' then
+    return old;
+  end if;
+
+  return new;
+end;
+$$;
+
+delete from public.daily_focus_totals totals
+where not exists (
+  select 1
+  from public.logs logs
+  where logs.user_id = totals.user_id
+    and logs.log_date = totals.focus_date
+    and logs.type_id = 'focus'
+);
+
+insert into public.daily_focus_totals (user_id, focus_date, total_focus_secs, total_distracted_secs, updated_at)
+select
+  user_id,
+  log_date,
+  coalesce(sum(duration_secs), 0)::integer,
+  coalesce(sum(distracted_secs), 0)::integer,
+  now()
+from public.logs
+where type_id = 'focus'
+group by user_id, log_date
+on conflict (user_id, focus_date) do update
+set
+  total_focus_secs = excluded.total_focus_secs,
+  total_distracted_secs = excluded.total_distracted_secs,
+  updated_at = now();
 
 create or replace function public.handle_new_user()
 returns trigger
@@ -188,6 +324,11 @@ create trigger set_user_settings_updated_at
 before update on public.user_settings
 for each row execute procedure public.set_current_timestamp_updated_at();
 
+drop trigger if exists sync_daily_focus_totals_after_logs_change on public.logs;
+create trigger sync_daily_focus_totals_after_logs_change
+after insert or update or delete on public.logs
+for each row execute procedure public.sync_daily_focus_totals_from_logs();
+
 drop trigger if exists set_study_material_folders_updated_at on public.study_material_folders;
 create trigger set_study_material_folders_updated_at
 before update on public.study_material_folders
@@ -196,8 +337,10 @@ for each row execute procedure public.set_current_timestamp_updated_at();
 alter table public.profiles enable row level security;
 alter table public.user_settings enable row level security;
 alter table public.logs enable row level security;
+alter table public.daily_focus_totals enable row level security;
 alter table public.study_material_folders enable row level security;
 alter table public.study_materials enable row level security;
+alter table public.ai_coach_messages enable row level security;
 
 drop policy if exists "users can view own profile" on public.profiles;
 create policy "users can view own profile"
@@ -262,6 +405,30 @@ using (auth.uid() = user_id);
 drop policy if exists "users can delete own logs" on public.logs;
 create policy "users can delete own logs"
 on public.logs
+for delete
+using (auth.uid() = user_id);
+
+drop policy if exists "users can view own daily focus totals" on public.daily_focus_totals;
+create policy "users can view own daily focus totals"
+on public.daily_focus_totals
+for select
+using (auth.uid() = user_id);
+
+drop policy if exists "users can view own ai coach messages" on public.ai_coach_messages;
+create policy "users can view own ai coach messages"
+on public.ai_coach_messages
+for select
+using (auth.uid() = user_id);
+
+drop policy if exists "users can insert own ai coach messages" on public.ai_coach_messages;
+create policy "users can insert own ai coach messages"
+on public.ai_coach_messages
+for insert
+with check (auth.uid() = user_id);
+
+drop policy if exists "users can delete own ai coach messages" on public.ai_coach_messages;
+create policy "users can delete own ai coach messages"
+on public.ai_coach_messages
 for delete
 using (auth.uid() = user_id);
 

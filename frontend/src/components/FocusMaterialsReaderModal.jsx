@@ -16,7 +16,7 @@ import {
 } from '../utils/studyMaterialsStore';
 
 const ALL_FOLDER_KEY = '__all__';
-const NO_FOLDER_LABEL = 'No folder';
+const NO_FOLDER_LABEL = 'root';
 
 function getMaterialIcon(viewerMode) {
     if (viewerMode === 'image') return <FileImage size={18} />;

@@ -4,14 +4,13 @@ import { AlertCircle, BookOpen, Crosshair, Pause, Play, ShieldAlert, TimerReset 
 import ProfileModal from '../components/ProfileModal';
 import FocusMaterialsReaderModal from '../components/FocusMaterialsReaderModal';
 import BrandLogo from '../components/BrandLogo';
+import distractionSound from '../assets/distraction-sound.mp4';
 import { createSessionLog } from '../utils/logStore';
 import { getUserDataOwnerId, getUserInitials, readStoredUser } from '../utils/userProfile';
 import { useFocusSession } from '../hooks/useFocusSession';
 import { useFocusMaterialsReader } from '../hooks/useFocusMaterialsReader';
 import { useStoredLogs } from '../hooks/useStoredLogs';
 import { signOutSupabase } from '../utils/supabaseAuth';
-
-const WARNING_SOUND_DATA_URI = 'data:audio/wav;base64,UklGRlQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YTAAAAABAAQACQAOABQAGQAfACQAKgAvADQAOQA+AEIARgBJAEwATgBQAFEAUQBRAD8ALQAbAAkA/P/u/+H/1f/K/8D/t/+v/6j/ov+d/5n/lf+T/5H/kf+S/5T/mP+d/6T/rP+3/8P/0P/e/+3//AAOAB8AMQA/AEwAVwBgAGUAZwBnAGQAXgBWAEoAPAAuAB8AEgAFAPr/8P/n/97/1v/P/8n/xP/A/73/uv+6/7r/vP/A/8X/zP/V/9//6v/3/wMA';
 
 export default function FocusTimer() {
     const [user, setUser] = useState(readStoredUser);
@@ -89,9 +88,11 @@ export default function FocusTimer() {
     React.useEffect(() => {
         if (typeof Audio === 'undefined') return undefined;
 
-        const warningAudio = new Audio(WARNING_SOUND_DATA_URI);
+        const warningAudio = new Audio(distractionSound);
+        warningAudio.src = distractionSound;
         warningAudio.preload = 'auto';
         warningAudio.volume = 1;
+        warningAudio.load();
         warningAudioRef.current = warningAudio;
 
         return () => {
@@ -130,18 +131,28 @@ export default function FocusTimer() {
             distractedSecs: totalDistractedTime,
             timestamp: new Date().toISOString(),
             sessionName,
-            notes: ''
+            notes: sessionName
         });
 
+        let savedSessionLog = sessionLog;
         if (userDataOwnerId) {
             try {
-                await addLog(sessionLog);
+                savedSessionLog = await addLog(sessionLog) || sessionLog;
             } catch (error) {
                 console.error('Session save error:', error);
             }
         }
 
-        navigate('/');
+        navigate('/', {
+            state: {
+                completedSession: {
+                    id: savedSessionLog.id,
+                    sessionName: savedSessionLog.sessionName,
+                    durationSecs: savedSessionLog.durationSecs,
+                    distractedSecs: savedSessionLog.distractedSecs,
+                }
+            }
+        });
     };
 
     const handleLogout = async () => {

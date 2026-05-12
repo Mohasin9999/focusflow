@@ -113,6 +113,14 @@ function toIsoTimestamp(input) {
     return new Date().toISOString();
 }
 
+function toLocalDateOnly(value) {
+    const date = parseDateValue(value) || new Date();
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+}
+
 function createId(source, index = 0) {
     return `${source}-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -122,18 +130,29 @@ function normalizeLogEntry(entry, index = 0) {
 
     const source = normalizeSource(entry.source);
     const typeId = normalizeTypeId(entry.typeId || entry.type, source);
+    const notes = typeof entry.notes === 'string' ? entry.notes : '';
+    const sessionName = typeof entry.sessionName === 'string'
+        ? entry.sessionName
+        : source === LOG_SOURCE_SESSION
+            ? notes
+            : '';
+
+    const timestamp = toIsoTimestamp(entry);
 
     return {
         id: entry.id !== undefined && entry.id !== null && String(entry.id).trim() !== ''
             ? String(entry.id)
             : createId(source, index),
         source,
-        timestamp: toIsoTimestamp(entry),
+        timestamp,
+        logDate: typeof entry.logDate === 'string' && DATE_ONLY_PATTERN.test(entry.logDate)
+            ? entry.logDate
+            : toLocalDateOnly(timestamp),
         typeId,
         durationSecs: parseDurationToSecs(entry.durationSecs ?? entry.duration),
         distractedSecs: normalizeSeconds(entry.distractedSecs ?? entry.distractedTime),
-        sessionName: typeof entry.sessionName === 'string' ? entry.sessionName : '',
-        notes: typeof entry.notes === 'string' ? entry.notes : ''
+        sessionName,
+        notes
     };
 }
 
@@ -155,6 +174,7 @@ function mapSupabaseLog(record) {
         id: record.id,
         source: record.source,
         timestamp: record.timestamp,
+        logDate: record.log_date,
         typeId: record.type_id,
         durationSecs: record.duration_secs,
         distractedSecs: record.distracted_secs,
@@ -164,15 +184,17 @@ function mapSupabaseLog(record) {
 }
 
 function toSupabaseLogPayload(userId, log) {
+    const sessionName = log.sessionName || (log.source === LOG_SOURCE_SESSION ? log.notes : '');
     const payload = {
         user_id: userId,
         source: log.source,
         type_id: log.typeId,
         duration_secs: log.durationSecs,
         distracted_secs: log.distractedSecs,
-        session_name: log.sessionName || '',
-        notes: log.notes || '',
+        session_name: sessionName,
+        notes: log.notes || (log.source === LOG_SOURCE_SESSION ? sessionName : ''),
         timestamp: log.timestamp,
+        log_date: log.logDate || toLocalDateOnly(log.timestamp),
     };
 
     if (hasValidLogId(log.id)) {
@@ -185,7 +207,7 @@ function toSupabaseLogPayload(userId, log) {
 async function listSupabaseLogs(userId) {
     const { data, error } = await supabase
         .from('logs')
-        .select('id, source, type_id, duration_secs, distracted_secs, session_name, notes, timestamp')
+        .select('id, source, type_id, duration_secs, distracted_secs, session_name, notes, timestamp, log_date')
         .eq('user_id', userId)
         .order('timestamp', { ascending: false });
 
@@ -218,7 +240,7 @@ export async function insertLog(userId, log) {
     const { data, error } = await supabase
         .from('logs')
         .insert(toSupabaseLogPayload(userId, normalizedLog))
-        .select('id, source, type_id, duration_secs, distracted_secs, session_name, notes, timestamp')
+        .select('id, source, type_id, duration_secs, distracted_secs, session_name, notes, timestamp, log_date')
         .maybeSingle();
 
     if (error) {
@@ -248,6 +270,7 @@ export async function updateLog(userId, logId, changes) {
     if (changes.notes !== undefined) patch.notes = typeof changes.notes === 'string' ? changes.notes : '';
     if (changes.timestamp !== undefined || changes.date !== undefined) {
         patch.timestamp = toIsoTimestamp(changes);
+        patch.log_date = toLocalDateOnly(patch.timestamp);
     }
 
     const { data, error } = await supabase
@@ -255,7 +278,7 @@ export async function updateLog(userId, logId, changes) {
         .update(patch)
         .eq('user_id', userId)
         .eq('id', logId)
-        .select('id, source, type_id, duration_secs, distracted_secs, session_name, notes, timestamp')
+        .select('id, source, type_id, duration_secs, distracted_secs, session_name, notes, timestamp, log_date')
         .maybeSingle();
 
     if (error) {
@@ -293,6 +316,7 @@ export function createActivityLog({ typeId, durationSecs, timestamp, notes = '' 
 }
 
 export function createSessionLog({ durationSecs, distractedSecs, timestamp, sessionName = '', notes = '' }) {
+    const normalizedSessionName = String(sessionName || '').trim();
     return normalizeLogEntry({
         id: createId(LOG_SOURCE_SESSION),
         source: LOG_SOURCE_SESSION,
@@ -300,8 +324,8 @@ export function createSessionLog({ durationSecs, distractedSecs, timestamp, sess
         durationSecs,
         distractedSecs,
         timestamp: timestamp || new Date().toISOString(),
-        sessionName,
-        notes
+        sessionName: normalizedSessionName,
+        notes: notes || normalizedSessionName
     });
 }
 

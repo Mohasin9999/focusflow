@@ -1,5 +1,5 @@
 import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import {
     Home as HomeIcon,
     Clock,
@@ -48,6 +48,81 @@ import { useStoredLogs } from '../hooks/useStoredLogs';
 import { getProfile, updateWeeklyGoalPreset } from '../utils/profileStore';
 import { useStudyMaterialsManager } from '../hooks/useStudyMaterialsManager';
 import { signOutSupabase } from '../utils/supabaseAuth';
+import { getApiUrl, readJsonResponse } from '../utils/api';
+import {
+    AI_COACH_MESSAGE_LIMIT,
+    clearAiCoachMessages,
+    insertAiCoachMessage,
+    listAiCoachMessages,
+    sanitizeAiCoachText
+} from '../utils/aiCoachStore';
+import { supabase } from '../lib/supabase';
+
+const DEFAULT_AI_WELCOME = 'Welcome to FocusFlow! Sign in to get personalized productivity insights and smart coaching.';
+
+async function getSupabaseAccessToken() {
+    if (!supabase) return '';
+
+    const { data, error } = await supabase.auth.getSession();
+    if (error) {
+        console.error('Supabase session read error:', error);
+        return '';
+    }
+
+    return data.session?.access_token || '';
+}
+
+function formatMinSec(seconds) {
+    const safeSeconds = Math.max(0, Math.round(Number(seconds) || 0));
+    return `${Math.floor(safeSeconds / 60)} min ${safeSeconds % 60} sec`;
+}
+
+function formatCoachSeconds(seconds) {
+    const safeSeconds = Math.max(0, Math.round(Number(seconds) || 0));
+    if (safeSeconds < 60) return `${safeSeconds} sec`;
+    return `${Math.floor(safeSeconds / 60)} min ${safeSeconds % 60} sec`;
+}
+
+function buildCompletedSessionFallbackMessage(completedSession) {
+    const sessionName = String(completedSession?.sessionName || 'your focus session').trim();
+    const focusedTimerSecs = Math.max(0, Math.round(Number(completedSession?.durationSecs) || 0));
+    const distractedSecs = Math.max(0, Math.round(Number(completedSession?.distractedSecs) || 0));
+    const durationSecs = focusedTimerSecs + distractedSecs;
+
+    return (
+        `Congratulations on finishing ${sessionName}! ` +
+        `Total session: ${formatMinSec(durationSecs)}. ` +
+        `Focused timer time: ${formatMinSec(focusedTimerSecs)}. ` +
+        `Distraction time: ${formatMinSec(distractedSecs)}. ` +
+        'Your report was saved to the database and added to your focus history.'
+    );
+}
+
+function buildCompletedSessionStatsOverride(logs, completedSession, safeGoalHours, now = new Date()) {
+    const completedSessionId = String(completedSession?.id || '').trim();
+    const completedFocusSecs = Math.max(0, Math.round(Number(completedSession?.durationSecs) || 0));
+    const completedDistractedSecs = Math.max(0, Math.round(Number(completedSession?.distractedSecs) || 0));
+    const latestLogs = Array.isArray(logs) ? logs : [];
+    const hasCompletedSessionLog = latestLogs.some((log) => String(log?.id || '').trim() === completedSessionId);
+    const dashboardData = buildHomeDashboardData(latestLogs, safeGoalHours, now);
+
+    return {
+        focusTodaySecs: dashboardData.stats.focusTodaySecs + (hasCompletedSessionLog ? 0 : completedFocusSecs),
+        distractionTodaySecs: dashboardData.stats.distractionTodaySecs + (hasCompletedSessionLog ? 0 : completedDistractedSecs)
+    };
+}
+
+async function clearAiCoachHistory(userId, setChatMessages) {
+    if (!userId) return;
+
+    try {
+        await clearAiCoachMessages(userId);
+    } catch (error) {
+        console.error('AI coach clear error:', error);
+    } finally {
+        setChatMessages([]);
+    }
+}
 
 export default function Home() {
     const [user, setUser] = React.useState(readStoredUser);
@@ -55,10 +130,12 @@ export default function Home() {
     const [isSidebarOpen, setIsSidebarOpen] = React.useState(false);
     const [chatMessages, setChatMessages] = React.useState([]);
     const [chatInput, setChatInput] = React.useState('');
+    const [isCoachReplyLoading, setIsCoachReplyLoading] = React.useState(false);
     const chatScrollRef = React.useRef(null);
     const [isHistoryPopupOpen, setIsHistoryPopupOpen] = React.useState(false);
     const [isAuthModalOpen, setIsAuthModalOpen] = React.useState(false);
     const [isStudyMaterialsModalOpen, setIsStudyMaterialsModalOpen] = React.useState(false);
+    const [isCoachOpen, setIsCoachOpen] = React.useState(false);
     const [isSessionNameModalOpen, setIsSessionNameModalOpen] = React.useState(false);
     const [sessionNameDraft, setSessionNameDraft] = React.useState('');
     const [sessionNameError, setSessionNameError] = React.useState('');
@@ -67,6 +144,8 @@ export default function Home() {
     const [weeklyGoalPreset, setWeeklyGoalPreset] = React.useState(DEFAULT_GOAL_PRESET);
     const [weeklyGoalStatus, setWeeklyGoalStatus] = React.useState('');
     const navigate = useNavigate();
+    const location = useLocation();
+    const handledCompletedSessionRef = React.useRef('');
     const navigateHome = React.useCallback(() => {
         navigate('/');
         setIsSidebarOpen(false);
@@ -78,30 +157,80 @@ export default function Home() {
     );
 
     React.useEffect(() => {
-        setChatMessages([
-            {
-                text: user
-                    ? `Welcome back, ${getUserGreetingName(user)}! Ready to focus today?`
-                    : 'Welcome to FocusFlow! Sign in to get personalized productivity insights and smart coaching.',
-                sender: 'ai'
-            }
-        ]);
+        setChatInput('');
+        setIsCoachReplyLoading(false);
     }, [user]);
 
     React.useEffect(() => {
-        const chatScrollElement = chatScrollRef.current;
-        if (!chatScrollElement) return;
-
-        if (typeof chatScrollElement.scrollTo === 'function') {
-            chatScrollElement.scrollTo({
-                top: chatScrollElement.scrollHeight,
-                behavior: 'smooth'
-            });
+        if (!userDataOwnerId) {
+            setChatMessages([
+                {
+                    text: DEFAULT_AI_WELCOME,
+                    sender: 'ai'
+                }
+            ]);
             return;
         }
 
-        chatScrollElement.scrollTop = chatScrollElement.scrollHeight;
+        if (location.state?.completedSession?.id) {
+            return;
+        }
+
+        let isCancelled = false;
+
+        const loadAiCoachMessages = async () => {
+            try {
+                const storedMessages = await listAiCoachMessages(userDataOwnerId);
+                if (isCancelled) return;
+
+                if (storedMessages.length >= AI_COACH_MESSAGE_LIMIT) {
+                    await clearAiCoachHistory(userDataOwnerId, setChatMessages);
+                    return;
+                }
+
+                if (storedMessages.length > 0) {
+                    setChatMessages(storedMessages);
+                    return;
+                }
+
+                setChatMessages([
+                    {
+                        text: `Welcome back, ${getUserGreetingName(user)}! Ready to focus today?`,
+                        sender: 'ai'
+                    }
+                ]);
+            } catch (error) {
+                if (isCancelled) return;
+                console.error('AI coach message load error:', error);
+                setChatMessages([
+                    {
+                        text: `Welcome back, ${getUserGreetingName(user)}! Ready to focus today?`,
+                        sender: 'ai'
+                    }
+                ]);
+            }
+        };
+
+        void loadAiCoachMessages();
+
+        return () => {
+            isCancelled = true;
+        };
+    }, [location.state, user, userDataOwnerId]);
+
+    React.useEffect(() => {
+        scrollChatToBottom(chatScrollRef.current);
     }, [chatMessages]);
+
+    React.useEffect(() => {
+        if (!isCoachOpen) return;
+
+        const timeoutId = window.setTimeout(() => {
+            scrollChatToBottom(chatScrollRef.current, 'auto');
+        }, 0);
+
+        return () => window.clearTimeout(timeoutId);
+    }, [isCoachOpen, chatMessages]);
 
     React.useEffect(() => {
         if (!userDataOwnerId) {
@@ -133,7 +262,7 @@ export default function Home() {
         };
     }, [userDataOwnerId]);
 
-    const { logs } = useStoredLogs({ userId: userDataOwnerId });
+    const { logs, refreshLogs } = useStoredLogs({ userId: userDataOwnerId });
     const [dashboardNow, setDashboardNow] = React.useState(() => new Date());
 
     React.useEffect(() => {
@@ -179,21 +308,235 @@ export default function Home() {
         moveMaterial,
     } = useStudyMaterialsManager({ user, userDataOwnerId });
 
-    const handleSendMessage = () => {
-        if (!chatInput.trim()) return;
+    const openAuthModal = React.useCallback((nextMode = 'signin', nextIntent = 'general') => {
+        setAuthMode(nextMode);
+        setAuthIntent(nextIntent);
+        setIsAuthModalOpen(true);
+        setIsSidebarOpen(false);
+    }, []);
 
-        const userMsg = { text: chatInput, sender: 'user' };
-        setChatMessages(prev => [...prev, userMsg]);
+    const weeklyProgressHours = React.useMemo(() => {
+        if (!user) return 0;
+        return Math.max(0, (Number(stats.focusWeeklySecs) || 0) / 3600);
+    }, [user, stats.focusWeeklySecs]);
+
+    const weeklyGoalProgressPercent = Math.min(100, Math.round((weeklyProgressHours / safeGoalHours) * 100));
+    const weeklyGoalProgressWidth = Math.min(100, (weeklyProgressHours / safeGoalHours) * 100);
+    const timezoneOffsetMinutes = React.useMemo(() => new Date().getTimezoneOffset(), []);
+
+    const coachStatsPayload = React.useMemo(() => {
+        const focusIssue = stats.distractionTodaySecs > stats.focusTodaySecs * 0.25
+            ? 'Distraction is taking a noticeable portion of your focus time today.'
+            : stats.focusTodaySecs === 0
+                ? 'No focus session has been completed yet today.'
+                : 'Focus is moving steadily today.';
+
+        return {
+            focusTime: formatCoachSeconds(stats.focusTodaySecs),
+            distractedTime: formatCoachSeconds(stats.distractionTodaySecs),
+            studyTime: `${stats.studyToday} hrs`,
+            sleepTime: `${stats.sleepToday} hrs`,
+            weeklyFocus: formatCoachSeconds(stats.focusWeeklySecs),
+            weeklyStudy: `${stats.studyWeekly} hrs`,
+            weeklySleep: `${stats.sleepWeekly} hrs`,
+            weeklyDistraction: formatCoachSeconds(stats.distractionWeeklySecs),
+            weeklyProgress: `${weeklyGoalProgressPercent}%`,
+            goalTarget: `${safeGoalHours} hrs this week`,
+            issue: focusIssue,
+        };
+    }, [
+        safeGoalHours,
+        stats.distractionTodaySecs,
+        stats.distractionWeeklySecs,
+        stats.focusTodaySecs,
+        stats.focusWeeklySecs,
+        stats.sleepToday,
+        stats.sleepWeekly,
+        stats.studyToday,
+        stats.studyWeekly,
+        weeklyGoalProgressPercent
+    ]);
+
+    const handleSendMessage = React.useCallback(async () => {
+        const trimmedInput = chatInput.trim();
+        if (!trimmedInput || isCoachReplyLoading) return;
+
+        if (!user) {
+            openAuthModal('signin', 'general');
+            return;
+        }
+
+        const userMsg = { text: trimmedInput, sender: 'user' };
+        const nextHistory = [...chatMessages, userMsg];
+        setChatMessages(nextHistory);
+        setChatInput('');
+        setIsCoachReplyLoading(true);
+
+        try {
+            await insertAiCoachMessage(userDataOwnerId, 'user', trimmedInput);
+
+            const response = await fetch(getApiUrl('/api/ai/coach'), {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    message: trimmedInput,
+                    userId: userDataOwnerId,
+                    accessToken: await getSupabaseAccessToken(),
+                    stats: coachStatsPayload,
+                    goal: GOAL_PRESETS[weeklyGoalPreset]?.label || DEFAULT_GOAL_PRESET,
+                    timezoneOffsetMinutes,
+                    history: nextHistory
+                        .filter((message) => message.sender === 'user' || message.sender === 'ai')
+                        .slice(-4)
+                        .map((message) => ({
+                            role: message.sender === 'ai' ? 'assistant' : 'user',
+                            text: message.text
+                        }))
+                })
+            });
+
+            const payload = await readJsonResponse(response);
+
+            if (!response.ok) {
+                throw new Error(payload.message || 'Unable to get coach guidance right now.');
+            }
+
+            const replyText = sanitizeAiCoachText(
+                payload.reply || 'I could not generate a useful reply just now. Please try again.',
+                'ai'
+            );
+            await insertAiCoachMessage(userDataOwnerId, 'ai', replyText);
+
+            const aiMsg = {
+                text: replyText,
+                sender: 'ai'
+            };
+            const visibleMessages = [...nextHistory, aiMsg];
+            if (visibleMessages.length >= AI_COACH_MESSAGE_LIMIT) {
+                await clearAiCoachHistory(userDataOwnerId, setChatMessages);
+                return;
+            }
+
+            setChatMessages(visibleMessages);
+        } catch (error) {
+            const errorMessages = [
+                ...nextHistory,
+                {
+                    text: error?.message || 'I could not respond right now. Please try again in a moment.',
+                    sender: 'ai'
+                }
+            ];
+            if (errorMessages.length >= AI_COACH_MESSAGE_LIMIT) {
+                await clearAiCoachHistory(userDataOwnerId, setChatMessages);
+                return;
+            }
+
+            setChatMessages(errorMessages);
+        } finally {
+            setIsCoachReplyLoading(false);
+        }
+    }, [
+        chatInput,
+        chatMessages,
+        coachStatsPayload,
+        isCoachReplyLoading,
+        openAuthModal,
+        timezoneOffsetMinutes,
+        user,
+        userDataOwnerId,
+        weeklyGoalPreset
+    ]);
+
+    React.useEffect(() => {
+        const completedSession = location.state?.completedSession;
+        const completedSessionId = String(completedSession?.id || '').trim();
+
+        if (!user || !userDataOwnerId || !completedSessionId) return;
+        if (handledCompletedSessionRef.current === completedSessionId) return;
+
+        handledCompletedSessionRef.current = completedSessionId;
+        navigate('/', { replace: true, state: {} });
+        setIsCoachOpen(true);
+        setIsCoachReplyLoading(true);
         setChatInput('');
 
-        // Simulate AI Response
-        setTimeout(() => {
-            setChatMessages(prev => [...prev, {
-                text: "That sounds like a productive plan! Based on your recent focus trends, I suggest working in 25-minute blocks with short breaks. Would you like me to guide you through a session?",
-                sender: 'ai'
-            }]);
-        }, 1000);
-    };
+        const loadingMessage = {
+            text: `Session finished. I am pulling the saved report for ${completedSession?.sessionName || 'your focus session'}...`,
+            sender: 'ai'
+        };
+        setChatMessages([loadingMessage]);
+
+        const loadCompletedSessionReport = async () => {
+            try {
+                await clearAiCoachHistory(userDataOwnerId, setChatMessages);
+                setChatMessages([loadingMessage]);
+                const latestLogs = await refreshLogs();
+                const completedSessionStats = buildCompletedSessionStatsOverride(
+                    latestLogs,
+                    completedSession,
+                    safeGoalHours,
+                    new Date()
+                );
+
+                const response = await fetch(getApiUrl('/api/ai/session-report'), {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        userId: userDataOwnerId,
+                        sessionId: completedSessionId,
+                        accessToken: await getSupabaseAccessToken(),
+                        timezoneOffsetMinutes,
+                        focusTodaySecs: completedSessionStats.focusTodaySecs,
+                        distractionTodaySecs: completedSessionStats.distractionTodaySecs
+                    })
+                });
+                const payload = await readJsonResponse(response);
+
+                if (!response.ok) {
+                    throw new Error(payload.message || 'Unable to build your session report right now.');
+                }
+
+                const replyText = String(payload.reply || '').trim() || buildCompletedSessionFallbackMessage(completedSession);
+                const visibleMessages = [
+                    {
+                        text: replyText,
+                        sender: 'ai'
+                    }
+                ];
+
+                setChatMessages(visibleMessages);
+                try {
+                    await insertAiCoachMessage(userDataOwnerId, 'ai', replyText);
+                } catch (saveError) {
+                    console.error('AI session report save error:', saveError);
+                }
+            } catch (error) {
+                const fallbackText = buildCompletedSessionFallbackMessage(completedSession);
+                const visibleMessages = [
+                    {
+                        text: fallbackText,
+                        sender: 'ai'
+                    }
+                ];
+
+                setChatMessages(visibleMessages);
+                try {
+                    await insertAiCoachMessage(userDataOwnerId, 'ai', fallbackText);
+                } catch (saveError) {
+                    console.error('AI session fallback save error:', saveError);
+                }
+                console.error('AI session report error:', error);
+            } finally {
+                setIsCoachReplyLoading(false);
+            }
+        };
+
+        void loadCompletedSessionReport();
+    }, [location.state, navigate, refreshLogs, safeGoalHours, timezoneOffsetMinutes, user, userDataOwnerId]);
 
     const handleLogout = async () => {
         setIsProfileModalOpen(false);
@@ -206,16 +549,9 @@ export default function Home() {
     React.useEffect(() => {
         if (!user) {
             setIsStudyMaterialsModalOpen(false);
+            setIsCoachOpen(false);
         }
     }, [user]);
-
-
-    const openAuthModal = React.useCallback((nextMode = 'signin', nextIntent = 'general') => {
-        setAuthMode(nextMode);
-        setAuthIntent(nextIntent);
-        setIsAuthModalOpen(true);
-        setIsSidebarOpen(false);
-    }, []);
 
     const closeAuthModal = React.useCallback(() => {
         setIsAuthModalOpen(false);
@@ -341,14 +677,6 @@ export default function Home() {
     const handleMoveStudyMaterial = React.useCallback(async (materialId, nextFolderId) => {
         await moveMaterial(materialId, nextFolderId);
     }, [moveMaterial]);
-
-    const weeklyProgressHours = React.useMemo(() => {
-        if (!user) return 0;
-        return Math.max(0, (Number(stats.focusWeeklySecs) || 0) / 3600);
-    }, [user, stats.focusWeeklySecs]);
-
-    const weeklyGoalProgressPercent = Math.min(100, Math.round((weeklyProgressHours / safeGoalHours) * 100));
-    const weeklyGoalProgressWidth = Math.min(100, (weeklyProgressHours / safeGoalHours) * 100);
     const studyMaterialsPreview = React.useMemo(() => studyMaterials.slice(0, 2), [studyMaterials]);
     const recentActivitiesPreview = React.useMemo(() => recentActivities.slice(0, 3), [recentActivities]);
 
@@ -466,10 +794,23 @@ export default function Home() {
 
                     <div className="flex items-center gap-4">
                         {user && (
-                            <button className="relative rounded-sm border border-white/10 bg-white/5 p-2 text-[#b3b3b3] hover:border-[var(--ff-line)] hover:text-[var(--ff-accent)] transition-colors">
+                            <>
+                                <button
+                                    type="button"
+                                    onClick={() => setIsCoachOpen(true)}
+                                    className="group relative rounded-[0.9rem] border border-[rgba(255,177,20,0.34)] bg-[linear-gradient(135deg,rgba(255,177,20,0.22),rgba(255,106,0,0.14))] p-2.5 text-[var(--ff-accent)] shadow-[0_0_0_6px_rgba(255,177,20,0.08)] transition-all hover:-translate-y-0.5 hover:shadow-[0_14px_28px_rgba(255,177,20,0.18)]"
+                                    aria-label="Open AI coach"
+                                >
+                                    <span className="pointer-events-none absolute -right-1.5 -top-1.5 flex h-5 min-w-5 items-center justify-center rounded-full bg-[#fff2cf] px-1 text-[9px] font-black uppercase tracking-[0.14em] text-[#7a4b00] shadow-[0_8px_16px_rgba(255,177,20,0.24)]">
+                                        AI
+                                    </span>
+                                    <Bot size={21} className="transition-transform group-hover:scale-110" />
+                                </button>
+                                <button className="relative rounded-sm border border-white/10 bg-white/5 p-2 text-[#b3b3b3] hover:border-[var(--ff-line)] hover:text-[var(--ff-accent)] transition-colors">
                                 <Bell size={20} />
                                 <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-[var(--ff-accent)] border border-[#1a1a1a]"></span>
-                            </button>
+                                </button>
+                            </>
                         )}
 
                         {user ? (
@@ -752,89 +1093,6 @@ export default function Home() {
                                 </div>
                             </div>
 
-                            {/* AI Coach */}
-                            <div>
-                                <div className="mb-4 flex items-start gap-3">
-                                    <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-[1rem] border border-[var(--ff-line)] bg-[rgba(255,177,20,0.1)] text-[var(--ff-accent)]">
-                                        <Bot size={18} />
-                                    </div>
-                                    <div>
-                                        <h3 className="text-lg font-bold text-[#f6f2eb]">AI Productivity Coach</h3>
-                                        <p className="text-xs font-medium uppercase tracking-[0.18em] text-[#8f8a82]">Ask for quick support without leaving the dashboard</p>
-                                    </div>
-                                </div>
-                                <div className="ff-panel-dark relative flex h-[388px] flex-col rounded-[2rem] p-6">
-                                    <div className="mb-4 flex items-start justify-between gap-4 flex-shrink-0">
-                                        <div className="flex items-center gap-3">
-                                            <div className="flex h-10 w-10 items-center justify-center rounded-sm bg-[var(--ff-accent)] text-[#111] shadow-[0_12px_30px_rgba(255,177,20,0.24)]">
-                                                <Sparkles size={20} />
-                                            </div>
-                                            <div>
-                                                <h4 className="font-bold text-[#f6f2eb]">Ready to help</h4>
-                                                <p className="text-[11px] uppercase tracking-[0.18em] text-[#8f8a82]">Based on your latest focus data</p>
-                                            </div>
-                                        </div>
-                                        <span className="rounded-full border border-[rgba(255,255,255,0.1)] bg-white/6 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#dad2c6]">
-                                            Coach
-                                        </span>
-                                    </div>
-
-                                    <div className="mb-4 flex flex-wrap gap-2 flex-shrink-0">
-                                        <Chip label="Plan next hour" icon={<Sparkles size={12} />} />
-                                        <Chip label="Refocus now" icon={<Target size={12} />} />
-                                    </div>
-
-                                    <div
-                                        ref={chatScrollRef}
-                                        className="ff-panel-dark-soft mb-4 flex-1 space-y-3 overflow-y-auto rounded-[1.75rem] bg-[linear-gradient(180deg,rgba(255,255,255,0.07),rgba(255,255,255,0.03))] p-4 pr-2 custom-scrollbar"
-                                    >
-                                        {chatMessages.map((msg, i) => (
-                                            <div key={i} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
-                                                <div className={`max-w-[85%] rounded-2xl p-3 text-sm leading-relaxed ${msg.sender === 'user'
-                                                    ? 'rounded-tr-none bg-[var(--ff-accent)] text-[#111111] shadow-[0_12px_30px_rgba(255,177,20,0.18)]'
-                                                    : 'rounded-tl-none border border-white/8 bg-white/7 text-[#d8d1c7]'
-                                                    }`}>
-                                                    {msg.text}
-                                                </div>
-                                            </div>
-                                        ))}
-                                    </div>
-
-                                    <div className="flex gap-2 flex-shrink-0">
-                                        <textarea
-                                            id="coach-prompt"
-                                            name="message"
-                                            value={chatInput}
-                                            onChange={(e) => setChatInput(e.target.value)}
-                                            onKeyDown={(e) => {
-                                                if (e.key === 'Enter' && !e.shiftKey) {
-                                                    e.preventDefault();
-                                                    handleSendMessage();
-                                                }
-                                            }}
-                                            placeholder="Ask for a next-step plan..."
-                                            autoComplete="off"
-                                            autoCorrect="off"
-                                            autoCapitalize="sentences"
-                                            spellCheck={false}
-                                            rows={1}
-                                            enterKeyHint="send"
-                                            data-lpignore="true"
-                                            data-1p-ignore="true"
-                                            data-bwignore="true"
-                                            data-form-type="other"
-                                            className="ff-input-dark flex-1 resize-none rounded-[1rem] px-4 py-3 text-sm leading-6 transition-all"
-                                        />
-                                        <button
-                                            onClick={handleSendMessage}
-                                            className="ff-button-accent flex h-12 w-12 items-center justify-center rounded-[1rem] text-[#141414] transition-all active:scale-95"
-                                        >
-                                            <Send size={18} />
-                                        </button>
-                                    </div>
-                                </div>
-                            </div>
-
                             {/* Study Materials */}
                             <div className="ff-panel-dark flex flex-col rounded-[2rem] p-6 text-[#f6f2eb]">
                                 <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
@@ -1072,8 +1330,121 @@ export default function Home() {
                     </div>
                 </div>
             ) : null}
+
+            {isCoachOpen ? (
+                <div
+                    className="fixed inset-0 z-[86] flex items-end justify-end bg-[rgba(12,12,12,0.45)] p-4 backdrop-blur-sm sm:p-6"
+                    onClick={() => setIsCoachOpen(false)}
+                >
+                    <div
+                        className="ff-panel-dark relative flex h-[78vh] w-full max-w-2xl flex-col rounded-[2rem] p-6 shadow-[0_30px_80px_rgba(0,0,0,0.36)]"
+                        onClick={(event) => event.stopPropagation()}
+                    >
+                        <div className="mb-4 flex items-start justify-between gap-4 flex-shrink-0">
+                            <div className="flex items-center gap-3">
+                                <div className="flex h-10 w-10 items-center justify-center rounded-sm bg-[var(--ff-accent)] text-[#111] shadow-[0_12px_30px_rgba(255,177,20,0.24)]">
+                                    <Sparkles size={20} />
+                                </div>
+                                <div>
+                                    <h4 className="font-bold text-[#f6f2eb]">AI Productivity Coach</h4>
+                                    <p className="text-[11px] uppercase tracking-[0.18em] text-[#8f8a82]">Based on your latest focus data</p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-3">
+                                <span className="rounded-full border border-[rgba(255,255,255,0.1)] bg-white/6 px-3 py-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#dad2c6]">
+                                    Coach
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={() => setIsCoachOpen(false)}
+                                    className="rounded-full border border-white/10 bg-white/6 px-3 py-1.5 text-xs font-semibold uppercase tracking-[0.16em] text-[#d0cbc2] transition-colors hover:bg-white/10"
+                                >
+                                    Close
+                                </button>
+                            </div>
+                        </div>
+
+                        <div className="mb-4 flex flex-wrap gap-2 flex-shrink-0">
+                            <Chip label="Plan next hour" icon={<Sparkles size={12} />} />
+                            <Chip label="Refocus now" icon={<Target size={12} />} />
+                        </div>
+
+                        <div
+                            ref={chatScrollRef}
+                            className="ff-panel-dark-soft mb-5 flex-1 space-y-4 overflow-y-auto rounded-[1.75rem] bg-[linear-gradient(180deg,rgba(255,255,255,0.07),rgba(255,255,255,0.03))] p-5 pr-3 custom-scrollbar"
+                        >
+                            {chatMessages.map((msg, i) => (
+                                <div key={i} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
+                                    <div className={`max-w-[92%] rounded-[1.35rem] px-4 py-3.5 text-[15px] leading-7 ${msg.sender === 'user'
+                                        ? 'rounded-tr-none bg-[var(--ff-accent)] text-[#111111] shadow-[0_12px_30px_rgba(255,177,20,0.18)]'
+                                        : 'rounded-tl-none border border-white/8 bg-white/7 text-[#e7dfd3] whitespace-pre-wrap'
+                                        }`}>
+                                        {msg.text}
+                                    </div>
+                                </div>
+                            ))}
+                            {isCoachReplyLoading && (
+                                <div className="flex justify-start">
+                                    <div className="max-w-[92%] rounded-[1.35rem] rounded-tl-none border border-white/8 bg-white/7 px-4 py-3.5 text-[15px] leading-7 text-[#e7dfd3]">
+                                        Thinking through your recent focus pattern...
+                                    </div>
+                                </div>
+                            )}
+                        </div>
+
+                        <div className="flex items-end gap-3 flex-shrink-0">
+                            <textarea
+                                id="coach-prompt"
+                                name="message"
+                                value={chatInput}
+                                onChange={(e) => setChatInput(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter' && !e.shiftKey) {
+                                        e.preventDefault();
+                                        handleSendMessage();
+                                    }
+                                }}
+                                placeholder="Ask for a next-step plan..."
+                                autoComplete="off"
+                                autoCorrect="off"
+                                autoCapitalize="sentences"
+                                spellCheck={false}
+                                rows={3}
+                                enterKeyHint="send"
+                                disabled={isCoachReplyLoading}
+                                data-lpignore="true"
+                                data-1p-ignore="true"
+                                data-bwignore="true"
+                                data-form-type="other"
+                                className="ff-input-dark min-h-[88px] flex-1 resize-none rounded-[1rem] px-4 py-3.5 text-[15px] leading-6 transition-all"
+                            />
+                            <button
+                                onClick={handleSendMessage}
+                                disabled={isCoachReplyLoading || !chatInput.trim()}
+                                className="ff-button-accent flex h-[56px] w-[56px] items-center justify-center rounded-[1rem] text-[#141414] transition-all active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
+                            >
+                                <Send size={20} />
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            ) : null}
         </div>
     );
+}
+
+function scrollChatToBottom(element, behavior = 'smooth') {
+    if (!element) return;
+
+    if (typeof element.scrollTo === 'function') {
+        element.scrollTo({
+            top: element.scrollHeight,
+            behavior
+        });
+        return;
+    }
+
+    element.scrollTop = element.scrollHeight;
 }
 
 // Components

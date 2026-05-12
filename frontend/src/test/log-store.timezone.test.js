@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildTimestampFromDateAndTime, parseLogTimestamp } from '../utils/logStore';
+import { buildTimestampFromDateAndTime, createSessionLog, parseLogTimestamp } from '../utils/logStore';
 
 describe('logStore timezone and date edge cases', () => {
     it('parses date-only values as local calendar dates without UTC shifting', () => {
@@ -31,5 +31,19 @@ describe('logStore timezone and date edge cases', () => {
         expect(noon).not.toBeNull();
         expect(noon.getHours()).toBe(12);
         expect(noon.getMinutes()).toBe(15);
+    });
+
+    it('keeps the session name on focus session logs', () => {
+        const log = createSessionLog({
+            durationSecs: 80,
+            distractedSecs: 0,
+            timestamp: '2026-03-01T10:00:00.000Z',
+            sessionName: 'Math'
+        });
+
+        expect(log.source).toBe('session');
+        expect(log.typeId).toBe('focus');
+        expect(log.sessionName).toBe('Math');
+        expect(log.notes).toBe('Math');
     });
 });

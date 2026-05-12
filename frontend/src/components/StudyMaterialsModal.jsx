@@ -17,7 +17,7 @@ import {
 } from '../utils/studyMaterialsStore';
 
 const ALL_FOLDER_KEY = '__all__';
-const NO_FOLDER_LABEL = 'No folder';
+const NO_FOLDER_LABEL = 'root';
 
 export default function StudyMaterialsModal({
     isOpen,
@@ -288,28 +288,6 @@ export default function StudyMaterialsModal({
                         <div className="mt-4 grid grid-cols-2 gap-3">
                             <HighlightCard label="Stored" value={`${materials.length}`} caption="files" />
                             <HighlightCard label="Folders" value={`${folders.length}`} caption="spaces" />
-                        </div>
-
-                        <div className="mt-4 rounded-[1.45rem] border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.08),rgba(255,255,255,0.04))] p-4 shadow-[0_18px_40px_rgba(0,0,0,0.12)]">
-                            <div className="flex items-center justify-between gap-3">
-                                <div>
-                                    <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-[#8f8a82]">Reader-friendly files</p>
-                                    <p className="mt-2 text-sm font-medium leading-6 text-[#ece5da]">Formats you can open directly during focus sessions.</p>
-                                </div>
-                                <span className="rounded-full border border-[rgba(255,177,20,0.16)] bg-[rgba(255,177,20,0.1)] px-3 py-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#f0d39a]">
-                                    Previewable
-                                </span>
-                            </div>
-                            <div className="mt-3 flex flex-wrap gap-2">
-                                {['PDF', 'TXT', 'MD', 'Images', 'Video'].map((type) => (
-                                    <span
-                                        key={type}
-                                        className="inline-flex min-h-[2.1rem] items-center justify-center rounded-[0.85rem] border border-white/10 bg-[rgba(255,255,255,0.07)] px-3 py-2 text-[10px] font-semibold uppercase tracking-[0.18em] text-[#ece5da]"
-                                    >
-                                        {type}
-                                    </span>
-                                ))}
-                            </div>
                         </div>
                     </div>
                 </section>
